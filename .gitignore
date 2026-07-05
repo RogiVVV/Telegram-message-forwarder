@@ -1,0 +1,4 @@
+bot_settings.db
+.venv
+.idea
+__pycache__
