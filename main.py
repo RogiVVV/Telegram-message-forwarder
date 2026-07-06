@@ -11,16 +11,25 @@ media_groups = {}
 MSG_TYPES = ['photo', 'video', 'document', 'animation', 'audio',
              'voice', 'video_note', 'sticker', 'poll', 'text']
 
+CANCEL_KEYBOARD = {
+    'keyboard': [[{'text': 'Отмена'}]],
+    'resize_keyboard': True,
+    'one_time_keyboard': True,
+}
+REMOVE_KEYBOARD = {
+    'remove_keyboard': True,
+}
+
 
 async def copy_message(session: aiohttp.ClientSession,
-                       target_chat_id: int | str,
                        source_chat_id: int | str,
+                       target_chat_id: int | str,
                        message_id: int) -> Any:
     """
     Пересылает сообщение из одного тг канала в другой
     :param session: текущая сессия
-    :param target_chat_id: айди адресата
     :param source_chat_id: айди адресанта
+    :param target_chat_id: айди адресата
     :param message_id: айди сообщения, которое нужно переслать
     :return: информация о боте
     """
@@ -37,12 +46,14 @@ async def copy_message(session: aiohttp.ClientSession,
 
 async def send_message(session: aiohttp.ClientSession,
                        target_chat_id: int | str,
-                       msg: str) -> Any:
+                       msg: str,
+                       reply_markup=None) -> Any:
     """
     Отправляет сообщение пользователю
     :param session: текущая сессия
     :param target_chat_id: айди адресата
     :param msg: сообщение, которое нужно переслать
+    :param reply_markup:
     :return: информация о боте
     """
     url = constants.URL + '/sendMessage'
@@ -51,20 +62,24 @@ async def send_message(session: aiohttp.ClientSession,
         'text': msg,
         'parse_mode': 'HTML',
     }
-    async with session.post(url, data=data) as resp:
+
+    if reply_markup is not None:
+        data['reply_markup'] = reply_markup
+
+    async with session.post(url, json=data) as resp:
         resp.raise_for_status()
         return await resp.json()
 
 
 async def copy_messages(session: aiohttp.ClientSession,
-                        target_chat_id: int | str,
                         source_chat_id: int | str,
+                        target_chat_id: int | str,
                         message_ids: list[int]) -> Any:
     """
     Пересылает несколько сообщений из одного тг канала в другой
     :param session: текущая сессия
-    :param target_chat_id: айди адресата
     :param source_chat_id: айди адресанта
+    :param target_chat_id: айди адресата
     :param message_ids: список айди сообщений, которые нужно переслать
     :return: информация о боте
     """
@@ -171,8 +186,8 @@ async def flush_ready_media_groups(session: aiohttp.ClientSession) -> None:
                 try:
                     await copy_messages(
                         session,
-                        target_chat_id,
                         source_chat_id,
+                        target_chat_id,
                         sorted(group['messages']),
                     )
                 except Exception as e:
@@ -196,6 +211,7 @@ async def main() -> None:
             updates = await get_updates(session, offset)
 
             for update in updates['result']:
+                print(update)
                 offset = update['update_id'] + 1
 
                 if 'channel_post' in update:
@@ -208,51 +224,66 @@ async def main() -> None:
                 message_id = post['message_id']
                 msg = post.get('text', '')
 
+                if msg == 'Отмена':
+                    sqlogic.reset_waiting_states(source_chat_id)
+                    await send_message(
+                        session,
+                        source_chat_id,
+                        'Действие отменено',
+                        REMOVE_KEYBOARD
+                    )
+                    continue
+
                 if sqlogic.is_waiting_id_for_adding(source_chat_id):
-                    if not re.fullmatch(r'-?\d+', msg):
-                        await send_message(session, source_chat_id, 'Некорректный id')
-                        continue
+                    ids = msg.split('\n')
+                    correct_ids = []
+                    for id in ids:
+                        if not re.fullmatch(r'-?\d+', id):
+                            await send_message(session, source_chat_id, f'Некорректный id: {id}')
+                            continue
 
-                    elif str(source_chat_id) == msg:
+                        elif str(source_chat_id) == id:
+                            await send_message(session, source_chat_id,
+                                               f'id {id} совпадает с вашим')
+                            continue
+                        sqlogic.add_source_chat_id(source_chat_id, id)
+                        correct_ids.append(id)
+                    added_ids = ', '.join(correct_ids)
+                    if added_ids:
+                        sqlogic.set_waiting_id_for_adding(source_chat_id, False)
                         await send_message(session, source_chat_id,
-                                           'id совпадает с вашим')
-                        continue
-
-                    sqlogic.add_target_chat_id(source_chat_id, msg)
-                    await send_message(session, source_chat_id, 'id добавлен в список адресатов')
+                                           f'id {added_ids} добавлены в список ресурсов',
+                                           REMOVE_KEYBOARD)
+                    else:
+                        await send_message(session, source_chat_id,
+                                           f'Не обнаружено корректных id. '
+                                           'Попробуйте ещё раз')
                     continue
 
                 if sqlogic.is_waiting_id_for_removing(source_chat_id):
-                    if not re.fullmatch(r'-?\d+', msg):
-                        await send_message(session, source_chat_id, 'Некорректный id')
-                        continue
+                    ids = msg.split('\n')
+                    correct_ids = []
+                    for id in ids:
+                        if not re.fullmatch(r'-?\d+', id):
+                            await send_message(session, source_chat_id, f'Некорректный id: {id}')
+                            continue
 
-                    elif str(source_chat_id) == msg:
+                        elif str(source_chat_id) == id:
+                            await send_message(session, source_chat_id,
+                                               f'id {id} совпадает с вашим')
+                            continue
+                        sqlogic.remove_source_chat_id(source_chat_id, id)
+                        correct_ids.append(id)
+                    added_ids = ', '.join(correct_ids)
+                    if added_ids:
+                        sqlogic.set_waiting_id_for_removing(source_chat_id, False)
                         await send_message(session, source_chat_id,
-                                           'id совпадает с вашим')
-                        continue
-
-                    sqlogic.remove_target_chat_id(source_chat_id, msg)
-                    await send_message(session, source_chat_id, 'id убран из списка адресатов')
-                    continue
-
-                if sqlogic.is_waiting_id_for_remote(source_chat_id):
-                    source_and_targets = msg.split('\n')
-                    source = source_and_targets[0]
-                    for target in source_and_targets[1:]:
-                        if not re.fullmatch(r'-?\d+', target):
-                            await send_message(session, source_chat_id,
-                                               f'Некорректный id: {target}')
-                            continue
-
-                        elif str(source) == target:
-                            await send_message(session, source_chat_id,
-                                               f'id совпадает с вашим: {target}')
-                            continue
-                        sqlogic.add_target_chat_id(source, target)
-                    await send_message(session, source_chat_id,
-                                       f'Все корректные id добавлены в список адресатов')
-                    sqlogic.set_waiting_id_for_remote(source_chat_id, False)
+                                           f'id {added_ids} убраны из списка ресурсов',
+                                           REMOVE_KEYBOARD)
+                    else:
+                        await send_message(session, source_chat_id,
+                                           f'Не обнаружено корректных id. '
+                                           'Попробуйте ещё раз')
                     continue
 
                 if sqlogic.is_waiting_for_types(source_chat_id):
@@ -275,42 +306,45 @@ async def main() -> None:
                         sqlogic.set_waiting_for_types(source_chat_id, False)
                         await send_message(session, source_chat_id,
                                            ('Выбранные типы сообщений: ' +
-                                            ', '.join(allowed_types)))
+                                            ', '.join(allowed_types)),
+                                           REMOVE_KEYBOARD)
                         continue
 
-                if msg == '/add_target_id':
+                if msg == '/check_sources':
+                    sources = sqlogic.get_source_chat_ids(source_chat_id)
                     await send_message(
                         session,
                         source_chat_id,
-                        'Введите id чата, в который бот будет пересылать сообщения'
+                        sources
+                    )
+                    continue
+
+                if msg == '/add_source_ids':
+                    await send_message(
+                        session,
+                        source_chat_id,
+                        'Введите id ресурсов в одном сообщении\n'
+                        'Каждый новый id с новой строчки',
+                        CANCEL_KEYBOARD
                     )
                     sqlogic.set_waiting_id_for_adding(source_chat_id, True)
                     continue
 
-                if msg == '/remove_target_id':
+                if msg == '/remove_source_ids':
                     await send_message(
                         session,
                         source_chat_id,
-                        'Введите id чата, который надо убрать из списка адресатов'
+                        'Введите id чатов, которые надо убрать из списка ресурсов\n'
+                        'Каждый новый id с новой строчки',
+                        CANCEL_KEYBOARD
                     )
                     sqlogic.set_waiting_id_for_removing(source_chat_id, True)
-                    continue
-
-                if msg == '/set_source_target_ids':
-                    await send_message(
-                        session,
-                        source_chat_id,
-                        'Введите id адресанта и id всех адресатов\n'
-                        'Каждый id c новой строки'
-                    )
-                    sqlogic.set_waiting_id_for_remote(source_chat_id, True)
                     continue
 
                 if msg == '/set_allowed_types':
                     await send_message(
                         session,
                         source_chat_id,
-
                         'Выберите типы сообщений, которые будут пересылаться ботом:\n'
                         'photo - фото 🖼\n'
                         'video - видео 📹\n'
@@ -322,44 +356,37 @@ async def main() -> None:
                         'sticker - стикеры\n'
                         'poll - опросы 📊\n'
                         'text - текстовые сообщения 💬\n'
-                        'Выпишите каждый новый тип с новой строчки'
+                        'Выпишите каждый новый тип с новой строчки',
+                        CANCEL_KEYBOARD
                     )
                     sqlogic.set_waiting_for_types(source_chat_id, True)
                     continue
 
                 kind = detect_message_kind(post)
-                allowed_types = sqlogic.get_allowed_types(source_chat_id)
                 if kind in {'paid_media', 'invoice', 'giveaway', 'giveaway_winners'}:
                     print(f"Skip unsupported kind={kind}, message_id={message_id}")
                     continue
-                if kind in allowed_types:
-                    if 'media_group_id' in post:
-                        group_id = (post['media_group_id'], source_chat_id)
-                        if group_id not in media_groups:
-                            media_groups[group_id] = {
-                                'messages': [],
-                                'last_update': time.time(),
-                                'chat_id': source_chat_id}
-                        media_groups[group_id]['messages'].append(message_id)
-                        media_groups[group_id]['last_update'] = time.time()
 
-                    elif not sqlogic.get_target_chat_ids(source_chat_id):
-                        await send_message(session, source_chat_id,
-                                           'Не выбран чат для пересылки\n'
-                                           'Установите чат для пересылки командой /set_target_id')
-
-                    else:
-                        target_chat_ids = sqlogic.get_target_chat_ids(source_chat_id)
-
-                        if not target_chat_ids:
-                            continue
-
-                        for target_chat_id in target_chat_ids:
+                target_chat_ids = sqlogic.get_target_chat_ids(source_chat_id)
+                for target in target_chat_ids:
+                    target = int(target)
+                    allowed_types = sqlogic.get_allowed_types(target)
+                    if kind in allowed_types:
+                        if 'media_group_id' in post:
+                            group_id = (post['media_group_id'], source_chat_id)
+                            if group_id not in media_groups:
+                                media_groups[group_id] = {
+                                    'messages': [],
+                                    'last_update': time.time(),
+                                    'chat_id': source_chat_id}
+                            media_groups[group_id]['messages'].append(message_id)
+                            media_groups[group_id]['last_update'] = time.time()
+                        else:
                             try:
                                 await copy_message(
                                     session,
-                                    target_chat_id,
                                     source_chat_id,
+                                    target,
                                     message_id,
                                 )
                             except Exception as e:
