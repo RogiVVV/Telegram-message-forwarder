@@ -21,6 +21,21 @@ REMOVE_KEYBOARD = {
 }
 
 
+async def get_chat_info(session: aiohttp.ClientSession, chat_id: int) -> dict | None:
+    """
+    Получает информацию о чате по айди
+    :param session: текущая сессия
+    :param chat_id: айди чата
+    :return: информация о чате
+    """
+    url = constants.URL + '/getChat'
+    async with session.post(url, json={'chat_id': chat_id}) as resp:
+        result = await resp.json(content_type=None)
+        if not resp.ok:
+            return None
+        return result['result']
+
+
 async def copy_message(session: aiohttp.ClientSession,
                        source_chat_id: int | str,
                        target_chat_id: int | str,
@@ -246,19 +261,54 @@ async def main() -> None:
                             await send_message(session, source_chat_id,
                                                f'id {id} совпадает с вашим')
                             continue
-                        sqlogic.add_source_chat_id(source_chat_id, id)
-                        correct_ids.append(id)
+                        else:
+                            chat = await get_chat_info(session, id)
+                            if chat is None:
+                                await send_message(session, source_chat_id, f'Бот не имеет доступа к чату {id}')
+                                continue
+
+                            chat_type = chat['type']
+                            if chat_type == 'private':
+                                await send_message(
+                                    session,
+                                    source_chat_id,
+                                    f'{id} - личный чат\n'
+                                    f'Нельзя добавлять личные чаты в список ресурсов'
+                                )
+                                continue
+                            if chat_type in {'group', 'supergroup'}:
+                                await send_message(
+                                    session,
+                                    source_chat_id,
+                                    f'Для пересылки в выбранном чате отправьте команду\n'
+                                    f'"/allow_forwarding_to {source_chat_id}"'
+                                )
+                                continue
+                            if chat_type == 'channel':
+                                if 'username' in chat:
+                                    correct_ids.append(id)
+                                    sqlogic.add_source_chat_id(id, source_chat_id)
+                                    await send_message(
+                                        session,
+                                        source_chat_id,
+                                        f'Чат {source_chat_id} добавлен в список ресурсов'
+                                    )
+                                else:
+                                    await send_message(
+                                        session,
+                                        source_chat_id,
+                                        f'Для пересылки в выбранном чате отправьте команду\n'
+                                        f'"/allow_forwarding_to {source_chat_id}"'
+                                    )
+                                continue
+
                     added_ids = ', '.join(correct_ids)
+                    sqlogic.set_waiting_id_for_adding(source_chat_id, False)
                     if added_ids:
-                        sqlogic.set_waiting_id_for_adding(source_chat_id, False)
                         await send_message(session, source_chat_id,
                                            f'id {added_ids} добавлены в список ресурсов',
                                            REMOVE_KEYBOARD)
-                    else:
-                        await send_message(session, source_chat_id,
-                                           f'Не обнаружено корректных id. '
-                                           'Попробуйте ещё раз')
-                    continue
+                        continue
 
                 if sqlogic.is_waiting_id_for_removing(source_chat_id):
                     ids = msg.split('\n')
@@ -308,6 +358,33 @@ async def main() -> None:
                                            ('Выбранные типы сообщений: ' +
                                             ', '.join(allowed_types)),
                                            REMOVE_KEYBOARD)
+                        continue
+
+                if msg.startswith('/allow_forwarding_to'):
+                    parts = msg.split(maxsplit=1)
+                    if len(parts) != 2:
+                        await send_message(session, source_chat_id, 'Использование: /allow_forwarding_to <target_id>')
+                        continue
+                    target_chat_id = parts[1]
+
+                    if not re.fullmatch(r'-?\d+', target_chat_id):
+                        await send_message(session, source_chat_id, f'Некорректный id')
+                        continue
+
+                    elif str(source_chat_id) == target_chat_id:
+                        await send_message(session, source_chat_id,
+                                           f'id совпадает с вашим')
+                        continue
+                    else:
+                        sqlogic.add_source_chat_id(target_chat_id, source_chat_id)
+                        await send_message(session, source_chat_id,
+                                           f'Вы разрешили боту пересылать '
+                                           f'сообщения в чат {target_chat_id}')
+                        await send_message(
+                            session,
+                            target_chat_id,
+                            f'Чат {source_chat_id} добавлен в список ресурсов'
+                        )
                         continue
 
                 if msg == '/check_sources':
